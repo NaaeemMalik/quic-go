@@ -955,3 +955,66 @@ func TestServerGracefulShutdown(t *testing.T) {
 		t.Fatal("timeout")
 	}
 }
+
+func TestServerAltSvcDeduplication(t *testing.T) {
+	tests := []struct {
+		name     string
+		ports    []int
+		expected string
+	}{
+		{
+			name:     "3 listeners on 443 -> exactly 1 token",
+			ports:    []int{443, 443, 443},
+			expected: `h3=":443"; ma=2592000`,
+		},
+		{
+			name:     "443, 8443, 443 -> 2 tokens in order",
+			ports:    []int{443, 8443, 443},
+			expected: `h3=":443"; ma=2592000,h3=":8443"; ma=2592000`,
+		},
+		{
+			name:     "4433 then 443 -> 2 tokens (substring regression)",
+			ports:    []int{4433, 443},
+			expected: `h3=":4433"; ma=2592000,h3=":443"; ma=2592000`,
+		},
+		{
+			name:     "0.0.0.0:443 plus [::]:443 -> 1 token",
+			ports:    []int{443, 443},
+			expected: `h3=":443"; ma=2592000`,
+		},
+		{
+			name:     "9+ distinct ports -> all unique, no panic, order kept",
+			ports:    []int{443, 444, 445, 446, 447, 448, 449, 450, 451, 452},
+			expected: `h3=":443"; ma=2592000,h3=":444"; ma=2592000,h3=":445"; ma=2592000,h3=":446"; ma=2592000,h3=":447"; ma=2592000,h3=":448"; ma=2592000,h3=":449"; ma=2592000,h3=":450"; ma=2592000,h3=":451"; ma=2592000,h3=":452"; ma=2592000`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{}
+			for _, p := range tt.ports {
+				s.listeners = append(s.listeners, listener{port: p})
+			}
+			s.generateAltSvcHeader()
+			altSvc, ok := getAltSvc(s)
+			require.True(t, ok)
+			require.Equal(t, tt.expected, altSvc)
+		})
+	}
+}
+
+func BenchmarkGenerateAltSvc(b *testing.B) {
+	for _, n := range []int{1, 3, 8} {
+		b.Run(fmt.Sprintf("%d_listeners", n), func(b *testing.B) {
+			s := &Server{}
+			for i := 0; i < n; i++ {
+				s.listeners = append(s.listeners, listener{port: 443})
+			}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				s.generateAltSvcHeader()
+			}
+		})
+	}
+}
